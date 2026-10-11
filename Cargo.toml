@@ -1,0 +1,30 @@
+[package]
+name = "mg-interface-prototype"
+version = "0.1.0"
+edition = "2024"
+default-run = "mg-interface-prototype"
+
+[[bin]]
+name = "mg-interface-prototype"
+path = "native/main.rs"
+
+[[bin]]
+name = "mg-interface-gpui-trial"
+path = "native/gpui_trial.rs"
+required-features = ["gpui-trial"]
+
+[features]
+gpui-trial = []
+
+[dependencies]
+dunce = "1"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "1.1.8"
+
+[target.'cfg(windows)'.dependencies]
+gpui = { version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
+raw-window-handle = "0.6"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Diagnostics_ToolHelp", "Win32_Graphics_Gdi"] }
+
+

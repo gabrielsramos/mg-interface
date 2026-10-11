@@ -1,0 +1,35 @@
+# Save this file while the app is running; updates appear within about 250 ms.
+[colors]
+background = "#111827"
+panel = "#1f2937"
+viewport = "#0b1220"
+text = "#e5e7eb"
+muted = "#9ca3af"
+accent = "#2563eb"
+secondary = "#374151"
+disabled = "#1f2937"
+error = "#f87171"
+
+[buttons]
+corner_radius = 6
+padding_horizontal = 16
+padding_vertical = 8
+
+[panels]
+corner_radius = 6
+padding = 20
+
+[typography]
+font_family = "Segoe UI"
+font_size = 16
+small_font_size = 12
+
+[spacing]
+page_padding = 24
+workspace_padding = 16
+gap = 16
+toolbar_gap = 12
+launcher_toolbar_height = 64
+workspace_toolbar_height = 56
+status_height = 32
+sidebar_width = 240
