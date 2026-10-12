@@ -14,9 +14,9 @@ The app opens the project launcher with no project selected. Choose **Open Proje
 
 Open Project uses GPUI's asynchronous native file picker; choose the game's `.csproj`. Cancelling keeps the launcher open, and invalid selections show a validation error.
 
-The ten most recent projects persist in `%APPDATA%\mg-interface\recent-projects.json`. Missing projects are marked unavailable; invalid selections leave the launcher open. Logs appear in the terminal. Stop is termination; pause is not implemented.
+The ten most recent projects persist in `%APPDATA%\mg-interface\recent-projects.json`. Missing projects are marked unavailable; invalid selections leave the launcher open. The Console panel below the game viewport displays build output, game stdout/stderr, and lifecycle messages. The search field filters messages and timestamps as you type using case-insensitive fuzzy matching; clear it or press Escape to show all logs. Each message has a local HH:MM:SS timestamp on the left and a separator line; a draggable scrollbar appears on the right. It follows new output and retains the latest 200 messages during a run, clears when the game stops, and starts fresh on Play; process output is also mirrored to the terminal. Stop is termination; pause is not implemented.
 
-The game remains an independent MonoGame project. The shared runner prepares `dotnet run --project <project> --configuration Debug`, using the project directory as its working directory. No game-side integration is needed:
+The game remains an independent MonoGame project. The shared runner prepares `dotnet run --project <project> --configuration Debug -p:MGInterfaceInspection=true`, using the project directory as its working directory. No game-side integration is needed:
 
 ```powershell
 dotnet run --project C:\path\to\your\game.csproj
@@ -46,25 +46,7 @@ cargo test --all-targets --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-Run the actual app's automated lifecycle check with an explicit project and isolated history:
-
-```powershell
-$env:MG_INTERFACE_GPUI_SMOKE_TEST = '1'
-$env:MG_INTERFACE_SMOKE_PROJECT = (Resolve-Path C:\path\to\your\game.csproj).Path
-$env:MG_INTERFACE_STATE_DIR = Join-Path $PWD 'target\gpui-app-smoke-state'
-cargo run
-Remove-Item Env:\MG_INTERFACE_GPUI_SMOKE_TEST
-Remove-Item Env:\MG_INTERFACE_SMOKE_PROJECT
-Remove-Item Env:\MG_INTERFACE_STATE_DIR
-```
-
-This checks the launcher, recent selection, separate idle workspace, Stop during startup, native attachment and size, layout movement, Stop and replay, then cleanup. Pixel rendering and mouse/keyboard focus still require manual inspection. Check game rendering and input, minimize/restore and closing the workspace during startup and playback.
-
-A GPUI diagnostic executable is also included:
-
-```powershell
-cargo run --features gpui-trial --bin mg-interface-gpui-trial -- C:\path\to\your\game.csproj
-```
+For manual verification, check game rendering and input, selection highlighting, scrolling, minimize/restore, Stop/replay, and closing the workspace during startup or playback.
 
 ## Live themes
 
@@ -83,4 +65,8 @@ Without this override, the app uses `themes/default.toml` in the source checkout
 
 `native/theme.rs` owns parsing, validation, the shared theme store and reusable style helpers. Views consume these helpers; game lifecycle logic does not depend on theme values. The app polls file contents on a background executor, detecting normal saves and atomic file replacements.
 
-For a live-reload integration check, copy the theme under `target`, set `MG_INTERFACE_THEME` to that disposable copy, and set `MG_INTERFACE_THEME_SMOKE_TEST=1` alongside the lifecycle smoke variables above. The check edits that copy, verifies changed colors and layout during playback, rejects an invalid save, restores the theme, and exercises Stop/replay and cleanup.
+## Scene inspection
+
+An optional mgcore scene bridge now sends snapshots over a named pipe. The workspace sidebar shows a live World/UI entity tree and read-only properties. Click a name to select it and an arrow to collapse its children. Selection survives updates and clears on removal, Stop, or disconnect. See [SCENE_INSPECTION.md](SCENE_INSPECTION.md) for game adaptation and protocol.
+
+

@@ -1,7 +1,10 @@
 use crate::{
+    entity_browser::EntityBrowser,
+    log_search::fuzzy_match,
     platform::{Viewport, ViewportBounds, ViewportState, WindowsSupervisor},
     recent_projects::RecentProjects,
-    runtime::{GameRunner, LaunchSpec},
+    runtime::{GameRunner, LaunchSpec, LogEntry},
+    search_input::{SearchChanged, SearchInput},
     theme::{ThemeStore, styles::ThemeStyled},
 };
 use gpui::{prelude::*, *};
@@ -44,7 +47,16 @@ impl Launcher {
                 return;
             }
         };
-        let bounds = Bounds::centered(None, size(px(1600.), px(880.)), cx);
+        let store = self.theme.read(cx);
+        let spacing = &store.theme.spacing;
+        let scale = window.scale_factor();
+        let width = 1280. / scale
+            + 8.
+            + spacing.sidebar_width
+            + spacing.gap
+            + 2. * spacing.workspace_padding;
+        let height = 720. / scale + 48. + 180. + spacing.gap + 2. * spacing.workspace_padding;
+        let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
         match cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -125,8 +137,8 @@ impl Render for Launcher {
                     .w_full()
                     .flex_shrink_0()
                     .h(px(theme.spacing.launcher_toolbar_height))
-                    .border_b_1()
-                    .border_color(rgb(theme.colors.secondary.0))
+                    .border_b_4()
+                    .border_color(rgb(theme.colors.muted.0))
                     .px(px(theme.spacing.page_padding))
                     .flex()
                     .items_center()
@@ -184,18 +196,27 @@ impl Render for Launcher {
             )
     }
 }
+#[derive(Clone, Copy, PartialEq)]
+enum ScrollSection {
+    Console,
+    Hierarchy,
+    Properties,
+}
+
 struct Workspace {
     theme: Entity<ThemeStore>,
     runner: GameRunner,
     viewport: Viewport,
     bounds: Rc<Cell<Option<ViewportBounds>>>,
     status: String,
+    console: Vec<LogEntry>,
+    entities: EntityBrowser,
+    search: Entity<SearchInput>,
+    console_scroll: ScrollHandle,
+    hierarchy_scroll: ScrollHandle,
+    properties_scroll: ScrollHandle,
+    scroll_drag: Option<(ScrollSection, f32)>,
     started: Instant,
-    attached: Option<Instant>,
-    inset: bool,
-    smoke: bool,
-    smoke_stage: u8,
-    smoke_origin_y: Option<i32>,
 }
 
 impl Workspace {
@@ -206,6 +227,12 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&theme, |_, _, cx| cx.notify()).detach();
+        let search = cx.new(|cx| SearchInput::new(theme.clone(), cx));
+        cx.subscribe(&search, |view, _, _: &SearchChanged, cx| {
+            view.console_scroll.set_offset(point(px(0.), px(0.)));
+            cx.notify();
+        })
+        .detach();
         let mut runner = GameRunner::default();
         let status = match runner.select(LaunchSpec {
             project,
@@ -236,12 +263,14 @@ impl Workspace {
             viewport: Viewport::default(),
             bounds: Rc::new(Cell::new(None)),
             status,
+            console: Vec::new(),
+            entities: EntityBrowser::default(),
+            search,
+            console_scroll: ScrollHandle::new(),
+            hierarchy_scroll: ScrollHandle::new(),
+            properties_scroll: ScrollHandle::new(),
+            scroll_drag: None,
             started: Instant::now(),
-            attached: None,
-            inset: false,
-            smoke: std::env::var_os("MG_INTERFACE_GPUI_SMOKE_TEST").is_some(),
-            smoke_stage: 0,
-            smoke_origin_y: None,
         }
     }
 
@@ -249,19 +278,35 @@ impl Workspace {
         if self.runner.is_active() {
             return;
         }
+        self.entities = EntityBrowser::default();
+        self.hierarchy_scroll.set_offset(point(px(0.), px(0.)));
+        self.properties_scroll.set_offset(point(px(0.), px(0.)));
+        self.scroll_drag = None;
+        self.console.clear();
+        self.console_scroll.set_offset(point(px(0.), px(0.)));
         match self.runner.play(&WindowsSupervisor) {
             Ok(()) => {
                 self.started = Instant::now();
                 self.status = "Starting dotnet...".into();
+                self.runner.log.push("Starting game...");
             }
-            Err(e) => self.status = e,
+            Err(e) => {
+                eprintln!("Workspace: {e}");
+                self.runner.log.push(format!("Error: {e}"));
+                self.status = e;
+            }
         }
     }
 
     fn stop(&mut self) {
         self.runner.stop();
+        self.entities = EntityBrowser::default();
+        self.hierarchy_scroll.set_offset(point(px(0.), px(0.)));
+        self.properties_scroll.set_offset(point(px(0.), px(0.)));
+        self.scroll_drag = None;
+        self.console.clear();
+        self.console_scroll.set_offset(point(px(0.), px(0.)));
         self.viewport.clear();
-        self.attached = None;
         self.status = "Stopped. Press Play to restart.".into();
     }
 
@@ -269,6 +314,7 @@ impl Workspace {
         if let Some(status) = self.runner.poll_exit()? {
             self.stop();
             self.status = format!("Game exited ({status}). Press Play to restart.");
+            println!("Game exited ({status}).");
         }
         let Some(pid) = self.runner.process_id() else {
             return Ok(());
@@ -280,7 +326,7 @@ impl Workspace {
         crate::platform::prepare_viewport(host)?;
         match self.viewport.poll(pid, host, bounds)? {
             ViewportState::Attached => {
-                self.attached = Some(Instant::now());
+                self.runner.log.push("Game viewport attached.");
                 self.status = "Running. Click the game to focus input.".into();
                 println!(
                     "GPUI viewport attached at {}, {} (1280x720)",
@@ -301,112 +347,15 @@ impl Workspace {
         if let Err(e) = self.poll(window) {
             self.stop();
             self.status = e.clone();
+            self.runner.log.push(format!("Error: {e}"));
             eprintln!("Workspace: {e}");
-            if self.smoke {
-                std::process::exit(1);
-            }
         }
-        if self.smoke {
-            if self.smoke_stage == 0 {
-                assert_eq!(
-                    cx.windows().len(),
-                    1,
-                    "Only the workspace should remain open"
-                );
-                if self.runner.project().is_none() {
-                    eprintln!("No valid smoke project");
-                    std::process::exit(1);
-                }
-                assert!(
-                    !self.runner.is_active(),
-                    "Loading a project must not start the game"
-                );
-                self.play();
-                self.stop();
-                assert!(
-                    self.runner.project().is_some(),
-                    "Stop must retain the project"
-                );
-                self.play();
-                self.smoke_stage = 1;
-            } else if self
-                .attached
-                .is_some_and(|time| time.elapsed() > Duration::from_secs(2))
-            {
-                match self.smoke_stage {
-                    1 => {
-                        self.smoke_origin_y = self.bounds.get().map(|bounds| bounds.y);
-                        self.inset = true;
-                        if std::env::var_os("MG_INTERFACE_THEME_SMOKE_TEST").is_some() {
-                            let path = &self.theme.read(cx).path;
-                            assert!(
-                                path.starts_with(
-                                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target")
-                                ),
-                                "Theme smoke requires a disposable file under target"
-                            );
-                            let source = include_str!("../themes/default.toml")
-                                .replace("#2563eb", "#ff00ff")
-                                .replace("sidebar_width = 240", "sidebar_width = 300");
-                            std::fs::write(path, source).expect("Write smoke theme");
-                        }
-                        self.smoke_stage = 2;
-                        self.attached = Some(Instant::now());
-                    }
-                    2 => {
-                        if self.bounds.get().map(|bounds| bounds.y) == self.smoke_origin_y {
-                            self.stop();
-                            eprintln!("GPUI layout did not move the embedded viewport");
-                            std::process::exit(1);
-                        }
-                        if std::env::var_os("MG_INTERFACE_THEME_SMOKE_TEST").is_some() {
-                            let store = self.theme.read(cx);
-                            assert_eq!(store.theme.colors.accent.0, 0xff00ff);
-                            assert_eq!(store.theme.spacing.sidebar_width, 300.);
-                            assert!(store.error.is_none());
-                            std::fs::write(&store.path, "[invalid")
-                                .expect("Write invalid smoke theme");
-                            self.smoke_stage = 4;
-                            self.attached = Some(Instant::now());
-                        } else {
-                            self.stop();
-                            self.play();
-                            self.smoke_stage = 3;
-                        }
-                    }
-                    4 => {
-                        let store = self.theme.read(cx);
-                        assert!(store.error.is_some());
-                        assert_eq!(store.theme.colors.accent.0, 0xff00ff);
-                        std::fs::write(&store.path, include_str!("../themes/default.toml"))
-                            .expect("Restore smoke theme");
-                        self.smoke_stage = 5;
-                        self.attached = Some(Instant::now());
-                    }
-                    5 => {
-                        let store = self.theme.read(cx);
-                        assert!(store.error.is_none());
-                        assert_eq!(store.theme.colors.accent.0, 0x2563eb);
-                        println!(
-                            "Live theme smoke passed: file reload, updated color and layout, invalid-file retention, recovery with game still running."
-                        );
-                        self.stop();
-                        self.play();
-                        self.smoke_stage = 3;
-                    }
-                    3 => {
-                        assert!(self.runner.is_active());
-                        println!(
-                            "App smoke passed: launcher, recent selection, idle workspace, startup stop, attach, layout movement, stop, replay, cleanup."
-                        );
-                        window.remove_window();
-                    }
-                    _ => {}
-                }
-            } else if !self.runner.is_active() && self.smoke_stage > 0 {
-                eprintln!("Game exited before GPUI smoke completed");
-                std::process::exit(1);
-            }
+        self.entities.update(self.runner.inspection_state());
+        self.runner.select_entity(self.entities.selected.as_deref());
+        if let Some(output) = self.runner.log.take_changed() {
+            self.console = output;
+            self.console_scroll.scroll_to_bottom();
+            cx.notify();
         }
         if self.runner.is_active() || self.status != previous_status {
             cx.notify();
@@ -414,15 +363,222 @@ impl Workspace {
     }
 }
 
+impl Workspace {
+    fn entities_panel(&self, cx: &mut Context<Self>) -> Div {
+        let hierarchy_scrollbar = self.scrollbar(ScrollSection::Hierarchy, cx);
+        let properties_scrollbar = self.scrollbar(ScrollSection::Properties, cx);
+        let store = self.theme.read(cx);
+        let theme = &store.theme;
+        let mut tree = div()
+            .id("entity-tree")
+            .flex_1()
+            .min_w(px(0.))
+            .h_full()
+            .min_h(px(0.))
+            .track_scroll(&self.hierarchy_scroll)
+            .overflow_y_scroll();
+        for (ui, heading) in [(false, "World"), (true, "UI")] {
+            tree = tree.child(
+                div()
+                    .px(px(12.))
+                    .py(px(6.))
+                    .text_color(rgb(theme.colors.muted.0))
+                    .child(heading),
+            );
+            for row in self.entities.rows(ui) {
+                let selected = self.entities.selected.as_deref() == Some(&row.id);
+                let select_id = row.id.clone();
+                let toggle_id = row.id.clone();
+                tree = tree.child(
+                    div()
+                        .id(SharedString::from(format!("entity-{}", row.id)))
+                        .flex()
+                        .items_center()
+                        .min_w(px(0.))
+                        .w_full()
+                        .border_1()
+                        .border_color(rgb(theme.colors.secondary.0))
+                        .py(px(4.))
+                        .pr(px(8.))
+                        .pl(px(12. + (row.depth.min(12) * 12) as f32))
+                        .when(selected, |view| view.bg(rgb(theme.colors.accent.0)))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("expand-{}", row.id)))
+                                .w(px(20.))
+                                .flex_shrink_0()
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    if row.has_children {
+                                        view.entities.toggle(&toggle_id);
+                                        cx.notify();
+                                    }
+                                }))
+                                .child(if !row.has_children {
+                                    "·"
+                                } else if row.collapsed {
+                                    "▸"
+                                } else {
+                                    "▾"
+                                }),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("select-{}", select_id)))
+                                .flex_1()
+                                .min_w(px(0.))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    view.properties_scroll.set_offset(point(px(0.), px(0.)));
+                                    view.entities.selected = Some(select_id.clone());
+                                    view.runner.select_entity(Some(&select_id));
+                                    cx.notify();
+                                }))
+                                .child(row.label),
+                        ),
+                );
+            }
+        }
+        let properties = self.entities.properties();
+        let inspector = div()
+            .id("entity-properties")
+            .flex_1()
+            .min_w(px(0.))
+            .h_full()
+            .min_h(px(0.))
+            .track_scroll(&self.properties_scroll)
+            .overflow_y_scroll()
+            .children(properties.into_iter().map(|(label, value)| {
+                div()
+                    .w_full()
+                    .px(px(12.))
+                    .py(px(5.))
+                    .border_1()
+                    .border_color(rgb(theme.colors.secondary.0))
+                    .child(div().text_color(rgb(theme.colors.muted.0)).child(label))
+                    .child(div().text_color(rgb(theme.colors.text.0)).child(value))
+            }));
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.))
+            .small_style(theme)
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .child(tree)
+                    .child(hierarchy_scrollbar),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .border_t_4()
+                    .border_color(rgb(theme.colors.muted.0))
+                    .child(inspector)
+                    .child(properties_scrollbar),
+            )
+    }
+
+    fn scrollbar(
+        &self,
+        section: ScrollSection,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let scroll = match section {
+            ScrollSection::Console => self.console_scroll.clone(),
+            ScrollSection::Hierarchy => self.hierarchy_scroll.clone(),
+            ScrollSection::Properties => self.properties_scroll.clone(),
+        };
+        let entity = cx.entity();
+        let store = self.theme.read(cx);
+        let track_color = rgb(store.theme.colors.viewport.0);
+        let thumb_color = rgb(store.theme.colors.muted.0);
+        canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                let height = f32::from(bounds.size.height);
+                let max = f32::from(scroll.max_offset().height);
+                let thumb_height = (height * height / (height + max).max(1.))
+                    .max(24.)
+                    .min(height);
+                let travel = (height - thumb_height).max(0.);
+                let offset = if max > 0. {
+                    -f32::from(scroll.offset().y) / max * travel
+                } else {
+                    0.
+                };
+                let thumb = Bounds::new(
+                    point(
+                        bounds.origin.x + px(2.),
+                        bounds.origin.y + px(offset.clamp(0., travel)),
+                    ),
+                    size(bounds.size.width - px(4.), px(thumb_height)),
+                );
+                window.paint_quad(fill(bounds, track_color));
+                window.paint_quad(fill(thumb, thumb_color));
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    let scroll = scroll.clone();
+                    move |event: &MouseDownEvent, _, _, cx| {
+                        if event.button != MouseButton::Left || !bounds.contains(&event.position) {
+                            return;
+                        }
+                        let grab = if thumb.contains(&event.position) {
+                            f32::from(event.position.y - thumb.origin.y)
+                        } else {
+                            thumb_height / 2.
+                        };
+                        let fraction = ((f32::from(event.position.y - bounds.origin.y) - grab)
+                            / travel.max(1.))
+                        .clamp(0., 1.);
+                        scroll.set_offset(point(px(0.), px(-fraction * max)));
+                        entity.update(cx, |view, cx| {
+                            view.scroll_drag = Some((section, grab));
+                            cx.notify();
+                        });
+                    }
+                });
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |_: &MouseUpEvent, _, _, cx| {
+                        entity.update(cx, |view, _| view.scroll_drag = None);
+                    }
+                });
+                window.on_mouse_event(move |event: &MouseMoveEvent, _, _, cx| {
+                    if !event.dragging() {
+                        return;
+                    }
+                    entity.update(cx, |view, cx| {
+                        if let Some((_, grab)) =
+                            view.scroll_drag.filter(|(active, _)| *active == section)
+                        {
+                            let fraction = ((f32::from(event.position.y - bounds.origin.y) - grab)
+                                / travel.max(1.))
+                            .clamp(0., 1.);
+                            scroll.set_offset(point(px(0.), px(-fraction * max)));
+                            cx.notify();
+                        }
+                    });
+                });
+            },
+        )
+        .w(px(12.))
+        .h_full()
+        .flex_shrink_0()
+    }
+}
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let entities_panel = self.entities_panel(cx);
         let scale = window.scale_factor();
         let tracked = self.bounds.clone();
-        let project = self
-            .runner
-            .project()
-            .map(|p| p.project.display().to_string())
-            .unwrap_or_else(|| "No valid project".into());
+        let query = self.search.read(cx).query().to_owned();
         let store = self.theme.read(cx);
         let theme = &store.theme;
         div()
@@ -441,48 +597,8 @@ impl Render for Workspace {
             .child(
                 div()
                     .flex()
-                    .gap(px(theme.spacing.toolbar_gap))
-                    .items_center()
-                    .h(px(theme.spacing.workspace_toolbar_height))
-                    .px(px(theme.spacing.workspace_padding))
-                    .child(
-                        div()
-                            .id("play")
-                            .button_style(theme, true, !self.runner.is_active())
-                            .cursor_pointer()
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.play();
-                                cx.notify();
-                            }))
-                            .child("Play"),
-                    )
-                    .child(
-                        div()
-                            .id("stop")
-                            .button_style(theme, false, self.runner.is_active())
-                            .cursor_pointer()
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                if view.runner.is_active() {
-                                    view.stop();
-                                    cx.notify();
-                                }
-                            }))
-                            .child("Stop"),
-                    )
-                    .child("MonoGame workspace"),
-            )
-            .child(
-                div()
-                    .px(px(theme.spacing.workspace_padding))
-                    .h(px(theme.spacing.status_height))
-                    .small_style(theme)
-                    .child(self.status.clone()),
-            )
-            .child(
-                div()
-                    .flex()
                     .gap(px(theme.spacing.gap))
-                    .px(px(theme.spacing.workspace_padding))
+                    .p(px(theme.spacing.workspace_padding))
                     .child(
                         div()
                             .w(px(theme.spacing.sidebar_width))
@@ -491,56 +607,176 @@ impl Render for Workspace {
                             .flex_col()
                             .gap(px(theme.spacing.gap))
                             .panel_style(theme)
-                            .child("Project")
-                            .child(div().small_style(theme).child(project))
-                            .child(
-                                div()
-                                    .small_style(theme)
-                                    .child("Click the game to focus keyboard and mouse input."),
-                            ),
+                            .p(px(0.))
+                            .overflow_hidden()
+                            .h(px(720. / scale + 240.))
+                            .child(entities_panel),
                     )
                     .child(
                         div()
                             .flex()
                             .flex_col()
-                            .mt(px(if self.inset { 24. } else { 0. }))
+                            .flex_shrink_0()
+                            .w(px(1280. / scale + 8.))
+                            .gap(px(theme.spacing.gap))
                             .child(
                                 div()
-                                    .relative()
-                                    .bg(rgb(theme.colors.viewport.0))
+                                    .flex()
+                                    .flex_col()
+                                    .flex_shrink_0()
+                                    .panel_style(theme)
+                                    .p(px(0.))
                                     .child(
-                                        canvas(
-                                            move |bounds, _, _| {
-                                                tracked.set(Some(ViewportBounds {
-                                                    x: (f32::from(bounds.origin.x) * scale).round()
-                                                        as i32,
-                                                    y: (f32::from(bounds.origin.y) * scale).round()
-                                                        as i32,
-                                                    width: 1280,
-                                                    height: 720,
-                                                }));
-                                            },
-                                            |_, _, _, _| {},
-                                        )
-                                        .w(px(1280. / scale))
-                                        .h(px(720. / scale)),
+                                        div()
+                                            .flex()
+                                            .gap(px(theme.spacing.toolbar_gap))
+                                            .items_center()
+                                            .justify_center()
+                                            .h(px(40.))
+                                            .flex_shrink_0()
+                                            .px(px(theme.spacing.workspace_padding))
+                                            .child(
+                                                div()
+                                                    .id("play")
+                                                    .button_style(
+                                                        theme,
+                                                        self.runner.is_active(),
+                                                        true,
+                                                    )
+                                                    .p(px(0.))
+                                                    .size(px(28.))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .text_size(px(14.))
+                                                    .cursor_pointer()
+                                                    .on_click(cx.listener(|view, _, _, cx| {
+                                                        view.play();
+                                                        cx.notify();
+                                                    }))
+                                                    .child("▶"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("stop")
+                                                    .button_style(theme, false, true)
+                                                    .p(px(0.))
+                                                    .size(px(28.))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .text_size(px(14.))
+                                                    .cursor_pointer()
+                                                    .on_click(cx.listener(|view, _, _, cx| {
+                                                        if view.runner.is_active() {
+                                                            view.stop();
+                                                            cx.notify();
+                                                        }
+                                                    }))
+                                                    .child("■"),
+                                            ),
                                     )
-                                    .when(!self.runner.is_active(), |area| {
-                                        area.child(
-                                            div()
-                                                .absolute()
-                                                .top(px(theme.panels.padding))
-                                                .left(px(theme.panels.padding))
-                                                .child("Press Play to run the game."),
-                                        )
-                                    }),
+                                    .child(
+                                        div().relative().bg(rgb(theme.colors.viewport.0)).child(
+                                            canvas(
+                                                move |bounds, _, _| {
+                                                    tracked.set(Some(ViewportBounds {
+                                                        x: (f32::from(bounds.origin.x) * scale)
+                                                            .round()
+                                                            as i32,
+                                                        y: (f32::from(bounds.origin.y) * scale)
+                                                            .round()
+                                                            as i32,
+                                                        width: 1280,
+                                                        height: 720,
+                                                    }));
+                                                },
+                                                |_, _, _, _| {},
+                                            )
+                                            .w(px(1280. / scale))
+                                            .h(px(720. / scale)),
+                                        ),
+                                    ),
                             )
                             .child(
                                 div()
-                                    .mt(px(theme.spacing.gap / 2.))
-                                    .small_style(theme)
+                                    .w_full()
+                                    .h(px(180.))
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .flex_col()
+                                    .panel_style(theme)
+                                    .p(px(12.))
+                                    .gap(px(8.))
+                                    .child(self.search.clone())
                                     .child(
-                                        "Standalone MonoGame • fixed 1280 × 720 physical pixels",
+                                        div()
+                                            .flex()
+                                            .flex_1()
+                                            .min_h(px(0.))
+                                            .gap(px(8.))
+                                            .child(
+                                                div()
+                                                    .id("console-output")
+                                                    .flex_1()
+                                                    .min_w(px(0.))
+                                                    .h_full()
+                                                    .overflow_y_scroll()
+                                                    .track_scroll(&self.console_scroll)
+                                                    .font_family("Consolas")
+                                                    .text_size(px(theme.typography.small_font_size))
+                                                    .children(
+                                                        self.console
+                                                            .iter()
+                                                            .filter(|entry| {
+                                                                fuzzy_match(
+                                                                    &query,
+                                                                    &format!(
+                                                                        "{} {}",
+                                                                        entry.timestamp,
+                                                                        entry.message
+                                                                    ),
+                                                                )
+                                                            })
+                                                            .map(|entry| {
+                                                                div()
+                                                                    .flex()
+                                                                    .w_full()
+                                                                    .gap(px(12.))
+                                                                    .py(px(6.))
+                                                                    .border_b_1()
+                                                                    .border_color(rgb(theme
+                                                                        .colors
+                                                                        .secondary
+                                                                        .0))
+                                                                    .child(
+                                                                        div()
+                                                                            .w(px(72.))
+                                                                            .flex_shrink_0()
+                                                                            .text_color(rgb(theme
+                                                                                .colors
+                                                                                .muted
+                                                                                .0))
+                                                                            .child(
+                                                                                entry
+                                                                                    .timestamp
+                                                                                    .clone(),
+                                                                            ),
+                                                                    )
+                                                                    .child(
+                                                                        div()
+                                                                            .flex_1()
+                                                                            .min_w(px(0.))
+                                                                            .child(
+                                                                                entry
+                                                                                    .message
+                                                                                    .clone(),
+                                                                            ),
+                                                                    )
+                                                            }),
+                                                    ),
+                                            )
+                                            .child(self.scrollbar(ScrollSection::Console, cx)),
                                     ),
                             ),
                     ),
@@ -551,6 +787,8 @@ impl Render for Workspace {
 pub fn run() {
     crate::platform::initialize();
     Application::new().run(|cx: &mut App| {
+        crate::platform::install_pointer_cleanup(cx);
+        crate::search_input::bind_keys(cx);
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -564,34 +802,10 @@ pub fn run() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |window, cx| {
-                cx.new(|cx: &mut Context<Launcher>| {
-                    let mut launcher = Launcher::new(theme, cx);
-                    if std::env::var_os("MG_INTERFACE_GPUI_SMOKE_TEST").is_some() {
-                        let project = PathBuf::from(
-                            std::env::var_os("MG_INTERFACE_SMOKE_PROJECT")
-                                .expect("Smoke requires an explicit project"),
-                        );
-                        cx.spawn_in(window, async move |entity, cx| {
-                            entity
-                                .update_in(cx, |view: &mut Launcher, window, cx| {
-                                    assert_eq!(cx.windows().len(), 1);
-                                    view.recents
-                                        .remember(project)
-                                        .expect("Smoke history write failed");
-                                    let recent = view.recents.paths()[0].clone();
-                                    view.load(recent, window, cx);
-                                })
-                                .expect("Smoke launcher disappeared");
-                        })
-                        .detach();
-                        launcher.status = "Smoke test".into();
-                    }
-                    launcher
-                })
-            },
+            |_, cx| cx.new(|cx| Launcher::new(theme, cx)),
         )
         .expect("Could not open project launcher");
         cx.activate(true);
     });
+    crate::platform::restore_pointer();
 }

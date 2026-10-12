@@ -5,6 +5,8 @@ use windows_sys::Win32::{Foundation::HWND, UI::WindowsAndMessaging::*};
 fn error(context: &str) -> String {
     format!("{context}: {}", std::io::Error::last_os_error())
 }
+mod cursor;
+pub use cursor::{install_cleanup as install_pointer_cleanup, restore_pointer};
 mod process;
 mod viewport;
 pub use process::WindowsSupervisor;

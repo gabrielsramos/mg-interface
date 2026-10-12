@@ -1,9 +1,9 @@
 use super::error;
-use crate::runtime::{ManagedProcess, ProcessSupervisor};
+use crate::runtime::{ConsoleLog, ManagedProcess, ProcessSupervisor};
 use std::{
     mem::size_of,
     os::windows::process::CommandExt,
-    process::{Child, Command, ExitStatus},
+    process::{Child, Command, ExitStatus, Stdio},
     ptr::null,
 };
 use windows_sys::Win32::{
@@ -13,8 +13,8 @@ use windows_sys::Win32::{
 
 pub struct WindowsSupervisor;
 impl ProcessSupervisor for WindowsSupervisor {
-    fn spawn(&self, command: Command) -> Result<Box<dyn ManagedProcess>, String> {
-        launch(command).map(|process| Box::new(process) as Box<dyn ManagedProcess>)
+    fn spawn(&self, command: Command, log: ConsoleLog) -> Result<Box<dyn ManagedProcess>, String> {
+        launch(command, log).map(|process| Box::new(process) as Box<dyn ManagedProcess>)
     }
 }
 impl ManagedProcess for Session {
@@ -39,7 +39,7 @@ impl Drop for Session {
     }
 }
 
-fn launch(mut command: Command) -> Result<Session, String> {
+fn launch(mut command: Command, log: ConsoleLog) -> Result<Session, String> {
     unsafe {
         let job = CreateJobObjectW(null(), null());
         if job.is_null() {
@@ -59,7 +59,11 @@ fn launch(mut command: Command) -> Result<Session, String> {
             return Err(failure);
         }
         // Suspend before assigning the job so no child can escape supervision.
-        let spawned = command.creation_flags(CREATE_SUSPENDED).spawn();
+        let spawned = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .creation_flags(CREATE_SUSPENDED)
+            .spawn();
         let mut child = match spawned {
             Ok(c) => c,
             Err(e) => {
@@ -76,6 +80,12 @@ fn launch(mut command: Command) -> Result<Session, String> {
             CloseHandle(job);
 
             return Err(failure);
+        }
+        if let Some(stdout) = child.stdout.take() {
+            log.capture(stdout, false);
+        }
+        if let Some(stderr) = child.stderr.take() {
+            log.capture(stderr, true);
         }
         let session = Session { child, job };
         // std::process does not expose the initial thread handle; enumerate it.

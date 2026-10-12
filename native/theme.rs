@@ -164,6 +164,8 @@ pub mod styles {
         fn panel_style(self, theme: &Theme) -> Self {
             self.p(px(theme.panels.padding))
                 .rounded(px(theme.panels.corner_radius))
+                .border_4()
+                .border_color(rgb(theme.colors.muted.0))
                 .bg(rgb(theme.colors.panel.0))
         }
         fn button_style(self, theme: &Theme, primary: bool, enabled: bool) -> Self {

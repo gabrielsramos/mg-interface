@@ -1,6 +1,12 @@
+#[cfg(any(windows, test))]
+mod entity_browser;
+#[cfg(any(windows, test))]
+mod log_search;
 mod platform;
 mod recent_projects;
 mod runtime;
+#[cfg(windows)]
+mod search_input;
 #[cfg(any(windows, test))]
 mod theme;
 #[cfg(windows)]
