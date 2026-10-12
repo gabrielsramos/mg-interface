@@ -37,3 +37,6 @@ pub fn prepare_viewport(host: HWND) -> Result<(), String> {
     }
     Ok(())
 }
+
+mod inspection;
+pub(crate) use inspection::{configure_inspection, connect_inspection};

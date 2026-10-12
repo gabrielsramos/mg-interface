@@ -88,6 +88,13 @@ impl ConsoleLog {
         })
     }
 }
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub enum PlayMode {
+    #[default]
+    Normal,
+    HotReload,
+}
+
 pub struct LaunchSpec {
     pub project: PathBuf,
     pub args: Vec<OsString>,
@@ -106,8 +113,14 @@ pub fn validate_project(path: PathBuf) -> Result<PathBuf, String> {
 }
 
 impl LaunchSpec {
-    fn command(&self) -> Result<Command, String> {
+    fn command(&self, mode: PlayMode) -> Result<Command, String> {
         let mut command = Command::new("dotnet");
+        if mode == PlayMode::HotReload {
+            command
+                .arg("watch")
+                .arg("--non-interactive")
+                .env("DOTNET_WATCH_RESTART_ON_RUDE_EDIT", "true");
+        }
         command
             .arg("run")
             .arg("--project")
@@ -139,6 +152,7 @@ pub struct GameRunner {
     project: Option<LaunchSpec>,
     process: Option<Box<dyn ManagedProcess>>,
     inspection: Option<inspection::InspectionSession>,
+    mode: PlayMode,
 }
 
 impl GameRunner {
@@ -157,6 +171,9 @@ impl GameRunner {
     pub fn is_active(&self) -> bool {
         self.process.is_some()
     }
+    pub fn is_hot_reload(&self) -> bool {
+        self.is_active() && self.mode == PlayMode::HotReload
+    }
     pub fn process_id(&self) -> Option<u32> {
         self.process.as_ref().map(|p| p.id())
     }
@@ -169,7 +186,11 @@ impl GameRunner {
         Ok(())
     }
 
-    pub fn play(&mut self, supervisor: &dyn ProcessSupervisor) -> Result<(), String> {
+    pub fn play(
+        &mut self,
+        supervisor: &dyn ProcessSupervisor,
+        mode: PlayMode,
+    ) -> Result<(), String> {
         if self.is_active() {
             return Ok(());
         }
@@ -177,16 +198,18 @@ impl GameRunner {
             .project
             .as_ref()
             .ok_or("Open a project first.")?
-            .command()?;
+            .command(mode)?;
         self.log = ConsoleLog::default();
         let inspection = inspection::InspectionSession::start();
-        command.env("MG_INTERFACE_INSPECTION_PIPE", &inspection.pipe_name);
+        inspection.configure_game(&mut command);
         self.process = Some(supervisor.spawn(command, self.log.clone())?);
         self.inspection = Some(inspection);
+        self.mode = mode;
         Ok(())
     }
 
     pub fn stop(&mut self) {
+        self.mode = PlayMode::Normal;
         self.process.take();
         self.inspection.take();
         self.log = ConsoleLog::default();
@@ -215,7 +238,7 @@ mod console_tests {
             project: std::path::PathBuf::from("game/Game.csproj"),
             args: vec!["--example".into()],
         };
-        let command = spec.command().unwrap();
+        let command = spec.command(super::PlayMode::Normal).unwrap();
         let args: Vec<_> = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -232,6 +255,46 @@ mod console_tests {
                 "--",
                 "--example"
             ]
+        );
+    }
+
+    #[test]
+    fn hot_reload_launches_watcher_with_inspection_and_game_arguments() {
+        let spec = super::LaunchSpec {
+            project: std::path::PathBuf::from("game/Game.csproj"),
+            args: vec!["--example".into()],
+        };
+        let command = spec.command(super::PlayMode::HotReload).unwrap();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "watch",
+                "--non-interactive",
+                "run",
+                "--project",
+                "game/Game.csproj",
+                "--configuration",
+                "Debug",
+                "-p:MGInterfaceInspection=true",
+                "--",
+                "--example"
+            ]
+        );
+        assert_eq!(
+            args.iter()
+                .filter(|arg| arg.as_str() == "--project")
+                .count(),
+            1
+        );
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "DOTNET_WATCH_RESTART_ON_RUDE_EDIT"
+                    && value == Some(std::ffi::OsStr::new("true")))
         );
     }
 

@@ -3,7 +3,7 @@ use crate::{
     log_search::fuzzy_match,
     platform::{Viewport, ViewportBounds, ViewportState, WindowsSupervisor},
     recent_projects::RecentProjects,
-    runtime::{GameRunner, LaunchSpec, LogEntry},
+    runtime::{GameRunner, LaunchSpec, LogEntry, PlayMode},
     search_input::{SearchChanged, SearchInput},
     theme::{ThemeStore, styles::ThemeStyled},
 };
@@ -274,7 +274,7 @@ impl Workspace {
         }
     }
 
-    fn play(&mut self) {
+    fn play(&mut self, mode: PlayMode) {
         if self.runner.is_active() {
             return;
         }
@@ -284,11 +284,16 @@ impl Workspace {
         self.scroll_drag = None;
         self.console.clear();
         self.console_scroll.set_offset(point(px(0.), px(0.)));
-        match self.runner.play(&WindowsSupervisor) {
+        match self.runner.play(&WindowsSupervisor, mode) {
             Ok(()) => {
                 self.started = Instant::now();
-                self.status = "Starting dotnet...".into();
-                self.runner.log.push("Starting game...");
+                self.status = if mode == PlayMode::HotReload {
+                    "Starting dotnet watch (hot reload)..."
+                } else {
+                    "Starting dotnet..."
+                }
+                .into();
+                self.runner.log.push(self.status.clone());
             }
             Err(e) => {
                 eprintln!("Workspace: {e}");
@@ -327,11 +332,21 @@ impl Workspace {
         match self.viewport.poll(pid, host, bounds)? {
             ViewportState::Attached => {
                 self.runner.log.push("Game viewport attached.");
-                self.status = "Running. Click the game to focus input.".into();
+                self.status = if self.runner.is_hot_reload() {
+                    "Running with hot reload. Click the game to focus input."
+                } else {
+                    "Running. Click the game to focus input."
+                }
+                .into();
                 println!(
                     "GPUI viewport attached at {}, {} (1280x720)",
                     bounds.x, bounds.y
                 );
+            }
+            ViewportState::Closed if self.runner.is_hot_reload() => {
+                self.viewport.clear();
+                self.started = Instant::now();
+                self.status = "Hot reload: waiting for the game window...".into();
             }
             ViewportState::Closed => self.stop(),
             ViewportState::Waiting if self.started.elapsed() > Duration::from_secs(120) => {
@@ -640,7 +655,8 @@ impl Render for Workspace {
                                                     .id("play")
                                                     .button_style(
                                                         theme,
-                                                        self.runner.is_active(),
+                                                        self.runner.is_active()
+                                                            && !self.runner.is_hot_reload(),
                                                         true,
                                                     )
                                                     .p(px(0.))
@@ -651,10 +667,45 @@ impl Render for Workspace {
                                                     .text_size(px(14.))
                                                     .cursor_pointer()
                                                     .on_click(cx.listener(|view, _, _, cx| {
-                                                        view.play();
+                                                        view.play(PlayMode::Normal);
                                                         cx.notify();
                                                     }))
                                                     .child("▶"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("play-hot-reload")
+                                                    .button_style(
+                                                        theme,
+                                                        self.runner.is_hot_reload(),
+                                                        true,
+                                                    )
+                                                    .p(px(0.))
+                                                    .size(px(28.))
+                                                    .relative()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .cursor_pointer()
+                                                    .on_click(cx.listener(|view, _, _, cx| {
+                                                        view.play(PlayMode::HotReload);
+                                                        cx.notify();
+                                                    }))
+                                                    .child(
+                                                        div()
+                                                            .absolute()
+                                                            .left(px(0.))
+                                                            .top(px(-3.))
+                                                            .size(px(28.))
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_center()
+                                                            .text_size(px(34.))
+                                                            .child("\u{27f3}"),
+                                                    )
+                                                    .child(
+                                                        div().text_size(px(10.)).child("\u{25b6}"),
+                                                    ),
                                             )
                                             .child(
                                                 div()
@@ -677,25 +728,33 @@ impl Render for Workspace {
                                             ),
                                     )
                                     .child(
-                                        div().relative().bg(rgb(theme.colors.viewport.0)).child(
-                                            canvas(
-                                                move |bounds, _, _| {
-                                                    tracked.set(Some(ViewportBounds {
-                                                        x: (f32::from(bounds.origin.x) * scale)
-                                                            .round()
-                                                            as i32,
-                                                        y: (f32::from(bounds.origin.y) * scale)
-                                                            .round()
-                                                            as i32,
-                                                        width: 1280,
-                                                        height: 720,
-                                                    }));
-                                                },
-                                                |_, _, _, _| {},
-                                            )
-                                            .w(px(1280. / scale))
-                                            .h(px(720. / scale)),
-                                        ),
+                                        div()
+                                            .relative()
+                                            .p(px(2.))
+                                            .bg(rgb(if self.runner.is_hot_reload() {
+                                                theme.colors.accent.0
+                                            } else {
+                                                theme.colors.viewport.0
+                                            }))
+                                            .child(
+                                                canvas(
+                                                    move |bounds, _, _| {
+                                                        tracked.set(Some(ViewportBounds {
+                                                            x: (f32::from(bounds.origin.x) * scale)
+                                                                .round()
+                                                                as i32,
+                                                            y: (f32::from(bounds.origin.y) * scale)
+                                                                .round()
+                                                                as i32,
+                                                            width: 1280,
+                                                            height: 720,
+                                                        }));
+                                                    },
+                                                    |_, _, _, _| {},
+                                                )
+                                                .w(px(1280. / scale))
+                                                .h(px(720. / scale)),
+                                            ),
                                     ),
                             )
                             .child(

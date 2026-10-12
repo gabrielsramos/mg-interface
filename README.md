@@ -10,7 +10,7 @@ Requires Rust's MSVC toolchain, Visual Studio C++ build tools, and the game's .N
 cargo run
 ```
 
-The app opens the project launcher with no project selected. Choose **Open Project** at the top or click a recent project. A separate workspace opens with the game stopped. Press **Play** to build and run it; **Stop** terminates the launched process tree, including during startup. Stopping or a game exit leaves the workspace and selected project open. Closing the workspace cleans up the game. Play and Stop appear only in the workspace.
+The app opens the project launcher with no project selected. Choose **Open Project** at the top or click a recent project. A separate workspace opens with the game stopped. Press **Play** to build and run it; **Play with Hot Reload** (the triangle inside a refresh ring) launches `dotnet watch` and marks the viewport with the theme accent border. Supported edits apply while the game runs; edits requiring a restart automatically restart and reattach the game window. **Stop** terminates the launched process tree, including during startup. Stopping or a game exit leaves the workspace and selected project open. Closing the workspace cleans up the game. Play and Stop appear only in the workspace.
 
 Open Project uses GPUI's asynchronous native file picker; choose the game's `.csproj`. Cancelling keeps the launcher open, and invalid selections show a validation error.
 
