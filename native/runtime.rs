@@ -127,7 +127,6 @@ impl LaunchSpec {
             .arg(&self.project)
             .arg("--configuration")
             .arg("Debug")
-            .arg("-p:MGInterfaceInspection=true")
             .arg("--")
             .args(&self.args)
             .current_dir(self.project.parent().ok_or("Project has no parent")?);
@@ -156,6 +155,22 @@ pub struct GameRunner {
 }
 
 impl GameRunner {
+    pub fn set_debug_checkbox(
+        &self,
+        revision: u64,
+        window_id: &str,
+        control_id: &str,
+        value: bool,
+    ) -> bool {
+        self.inspection
+            .as_ref()
+            .is_some_and(|session| session.set_checkbox(revision, window_id, control_id, value))
+    }
+    pub fn invoke_debug_button(&self, revision: u64, window_id: &str, control_id: &str) -> bool {
+        self.inspection
+            .as_ref()
+            .is_some_and(|session| session.invoke_button(revision, window_id, control_id))
+    }
     pub fn select_entity(&self, id: Option<&str>) {
         if let Some(session) = &self.inspection {
             session.select_entity(id);
@@ -233,7 +248,7 @@ mod console_tests {
     use std::io::Cursor;
 
     #[test]
-    fn inspection_build_property_is_passed_before_game_arguments() {
+    fn normal_launch_uses_debug_configuration_and_game_arguments() {
         let spec = super::LaunchSpec {
             project: std::path::PathBuf::from("game/Game.csproj"),
             args: vec!["--example".into()],
@@ -251,7 +266,6 @@ mod console_tests {
                 "game/Game.csproj",
                 "--configuration",
                 "Debug",
-                "-p:MGInterfaceInspection=true",
                 "--",
                 "--example"
             ]
@@ -259,7 +273,7 @@ mod console_tests {
     }
 
     #[test]
-    fn hot_reload_launches_watcher_with_inspection_and_game_arguments() {
+    fn hot_reload_launches_watcher_with_debug_configuration_and_game_arguments() {
         let spec = super::LaunchSpec {
             project: std::path::PathBuf::from("game/Game.csproj"),
             args: vec!["--example".into()],
@@ -279,7 +293,6 @@ mod console_tests {
                 "game/Game.csproj",
                 "--configuration",
                 "Debug",
-                "-p:MGInterfaceInspection=true",
                 "--",
                 "--example"
             ]

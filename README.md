@@ -16,7 +16,7 @@ Open Project uses GPUI's asynchronous native file picker; choose the game's `.cs
 
 The ten most recent projects persist in `%APPDATA%\mg-interface\recent-projects.json`. Missing projects are marked unavailable; invalid selections leave the launcher open. The Console panel below the game viewport displays build output, game stdout/stderr, and lifecycle messages. The search field filters messages and timestamps as you type using case-insensitive fuzzy matching; clear it or press Escape to show all logs. Each message has a local HH:MM:SS timestamp on the left and a separator line; a draggable scrollbar appears on the right. It follows new output and retains the latest 200 messages during a run, clears when the game stops, and starts fresh on Play; process output is also mirrored to the terminal. Stop is termination; pause is not implemented.
 
-The game remains an independent MonoGame project. The shared runner prepares `dotnet run --project <project> --configuration Debug -p:MGInterfaceInspection=true`, using the project directory as its working directory. No game-side integration is needed:
+The game remains an independent MonoGame project. The shared runner prepares `dotnet run --project <project> --configuration Debug`, using the project directory as its working directory. No game-side integration is needed:
 
 ```powershell
 dotnet run --project C:\path\to\your\game.csproj
@@ -27,6 +27,7 @@ dotnet run --project C:\path\to\your\game.csproj
 - `native/theme.rs`: configurable appearance, validation and shared style helpers.
 - `themes/default.toml`: editable theme with live reloading.
 - `native/ui.rs`: GPUI launcher, recent-project list, workspace layout and playback controls.
+- `native/debug_windows.rs`: debug-window catalog and selection state.
 - `native/runtime.rs`: shared project validation, dotnet command preparation, process ownership and lifecycle. The process supervisor receives a prepared `Command`.
 - `native/recent_projects.rs`: platform-independent history persistence.
 - `native/platform/windows.rs`: GPUI window handle and renderer compatibility setup.
@@ -69,4 +70,4 @@ Without this override, the app uses `themes/default.toml` in the source checkout
 
 An optional mgcore scene bridge now sends snapshots over a named pipe. The workspace sidebar shows a live World/UI entity tree and read-only properties. Click a name to select it and an arrow to collapse its children. Selection survives updates and clears on removal, Stop, or disconnect. See [SCENE_INSPECTION.md](SCENE_INSPECTION.md) for game adaptation and protocol.
 
-
+Games launched with `mgcore.GameHost.Run(game)` can also define custom debug windows with labels, buttons, separators, and checkboxes. Play automatically discovers window classes in the game assembly and builds their schemas once the game connects. The right sidebar has a window dropdown; button and checkbox callbacks run on the game thread. Checkbox changes return the confirmed value without rebuilding windows. Replay the game to rebuild windows, label snapshots, and context after changes. The existing entity inspector stays on the left, and the game keeps its fixed viewport size. See [SCENE_INSPECTION.md](SCENE_INSPECTION.md#debug-windows) for the API and protocol.

@@ -1,4 +1,5 @@
 use crate::{
+    debug_windows::DebugWindowBrowser,
     entity_browser::EntityBrowser,
     log_search::fuzzy_match,
     platform::{Viewport, ViewportBounds, ViewportState, WindowsSupervisor},
@@ -52,8 +53,8 @@ impl Launcher {
         let scale = window.scale_factor();
         let width = 1280. / scale
             + 8.
-            + spacing.sidebar_width
-            + spacing.gap
+            + 2. * spacing.sidebar_width
+            + 2. * spacing.gap
             + 2. * spacing.workspace_padding;
         let height = 720. / scale + 48. + 180. + spacing.gap + 2. * spacing.workspace_padding;
         let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
@@ -211,6 +212,10 @@ struct Workspace {
     status: String,
     console: Vec<LogEntry>,
     entities: EntityBrowser,
+    windows_revision: Option<u64>,
+    debug_windows: DebugWindowBrowser,
+    windows_dropdown_open: bool,
+    debug_window_scroll: ScrollHandle,
     search: Entity<SearchInput>,
     console_scroll: ScrollHandle,
     hierarchy_scroll: ScrollHandle,
@@ -265,6 +270,10 @@ impl Workspace {
             status,
             console: Vec::new(),
             entities: EntityBrowser::default(),
+            windows_revision: None,
+            debug_windows: DebugWindowBrowser::default(),
+            windows_dropdown_open: false,
+            debug_window_scroll: ScrollHandle::new(),
             search,
             console_scroll: ScrollHandle::new(),
             hierarchy_scroll: ScrollHandle::new(),
@@ -279,6 +288,7 @@ impl Workspace {
             return;
         }
         self.entities = EntityBrowser::default();
+        self.reset_debug_windows();
         self.hierarchy_scroll.set_offset(point(px(0.), px(0.)));
         self.properties_scroll.set_offset(point(px(0.), px(0.)));
         self.scroll_drag = None;
@@ -306,6 +316,7 @@ impl Workspace {
     fn stop(&mut self) {
         self.runner.stop();
         self.entities = EntityBrowser::default();
+        self.reset_debug_windows();
         self.hierarchy_scroll.set_offset(point(px(0.), px(0.)));
         self.properties_scroll.set_offset(point(px(0.), px(0.)));
         self.scroll_drag = None;
@@ -365,7 +376,43 @@ impl Workspace {
             self.runner.log.push(format!("Error: {e}"));
             eprintln!("Workspace: {e}");
         }
-        self.entities.update(self.runner.inspection_state());
+        let inspection = self.runner.inspection_state();
+        if let Some(catalog) = &inspection.windows {
+            if self.windows_revision != Some(catalog.revision) {
+                self.windows_revision = Some(catalog.revision);
+                let titles = catalog
+                    .windows
+                    .iter()
+                    .map(|window| window.title.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.runner.log.push(format!(
+                    "Debug windows loaded: {} found{}",
+                    catalog.windows.len(),
+                    if titles.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({titles})")
+                    }
+                ));
+                for error in &catalog.errors {
+                    self.runner.log.push(format!("Debug window error: {error}"));
+                }
+            }
+        } else {
+            self.windows_revision = None;
+        }
+        let previous_selection = self.debug_windows.selected.clone();
+        self.debug_windows
+            .update(inspection.windows.clone().filter(|_| inspection.connected));
+        if self.debug_windows.selected != previous_selection {
+            self.debug_window_scroll.set_offset(point(px(0.), px(0.)));
+            self.windows_dropdown_open = false;
+        }
+        if !inspection.connected {
+            self.windows_dropdown_open = false;
+        }
+        self.entities.update(inspection);
         self.runner.select_entity(self.entities.selected.as_deref());
         if let Some(output) = self.runner.log.take_changed() {
             self.console = output;
@@ -379,6 +426,263 @@ impl Workspace {
 }
 
 impl Workspace {
+    fn reset_debug_windows(&mut self) {
+        self.windows_revision = None;
+        self.debug_windows.update(None);
+        self.windows_dropdown_open = false;
+        self.debug_window_scroll.set_offset(point(px(0.), px(0.)));
+    }
+
+    fn debug_element(
+        &self,
+        element: &crate::runtime::inspection::DebugElement,
+        scope: (&str, u64),
+        inspection: &crate::runtime::inspection::InspectionState,
+        theme: &crate::theme::Theme,
+        cx: &Context<Self>,
+    ) -> Div {
+        let (window_id, revision) = scope;
+        let mut view = match element.element_type.as_str() {
+            "row" => {
+                let mut row = div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(element.gap.unwrap_or(8.).clamp(0., 256.)));
+                for child in element.children.as_deref().unwrap_or_default() {
+                    row = row.child(self.debug_element(child, scope, inspection, theme, cx));
+                }
+                row
+            }
+            "space" => div().size(px(element.size.unwrap_or(8.).clamp(0., 4096.))),
+            "separator" => div().w_full().h(px(1.)).bg(rgb(theme.colors.secondary.0)),
+            "label" => div().child(element.text.clone()),
+            "checkbox" => {
+                let window_id = window_id.to_owned();
+                let control_id = element.id.clone();
+                let value = element.value.unwrap_or(false);
+                let enabled = inspection.connected
+                    && !inspection.checkbox_waiting()
+                    && element.value.is_some();
+                // Only the checkbox indicator and label are interactive; no button surface.
+                div().child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "debug-checkbox-{window_id}-{control_id}"
+                        )))
+                        .flex()
+                        .items_center()
+                        .gap(px(7.))
+                        .py(px(2.))
+                        .when(enabled, |view| view.cursor_pointer())
+                        .when(!enabled, |view| view.opacity(0.5))
+                        .child(
+                            div()
+                                .size(px(16.))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .overflow_hidden()
+                                .border_1()
+                                .rounded(px(2.))
+                                .border_color(rgb(if value {
+                                    theme.colors.accent.0
+                                } else {
+                                    theme.colors.muted.0
+                                }))
+                                .text_size(px(12.))
+                                .text_color(rgb(if value {
+                                    theme.colors.accent.0
+                                } else {
+                                    theme.colors.muted.0
+                                }))
+                                .child(if value { "✓" } else { "" }),
+                        )
+                        .child(element.text.clone())
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            if enabled
+                                && !view.runner.set_debug_checkbox(
+                                    revision,
+                                    &window_id,
+                                    &control_id,
+                                    !value,
+                                )
+                            {
+                                view.runner.log.push(
+                                    "Debug checkbox unavailable: wait for the game or replay it.",
+                                );
+                            }
+                            cx.notify();
+                        })),
+                )
+            }
+            "button" => {
+                let window_id = window_id.to_owned();
+                let control_id = element.id.clone();
+                div().child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "debug-button-{window_id}-{control_id}"
+                        )))
+                        .button_style(theme, false, inspection.connected)
+                        .child(element.text.clone())
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            if !view
+                                .runner
+                                .invoke_debug_button(revision, &window_id, &control_id)
+                            {
+                                view.runner.log.push(
+                                    "Debug button unavailable: replay the game and try again.",
+                                );
+                            }
+                            cx.notify();
+                        })),
+                )
+            }
+            _ => div()
+                .small_style(theme)
+                .child(format!("Unsupported control: {}", element.element_type)),
+        };
+        if let Some(size) = element
+            .font_size
+            .filter(|size| size.is_finite() && (1. ..=128.).contains(size))
+        {
+            view = view.text_size(px(size));
+        }
+        if let Some(color) = element.color.as_deref().and_then(|color| {
+            color
+                .strip_prefix('#')
+                .filter(|hex| hex.len() == 6)
+                .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+        }) {
+            view = view.text_color(rgb(color));
+        }
+        view.flex_shrink_0()
+    }
+    fn debug_windows_panel(&self, scale: f32, cx: &mut Context<Self>) -> Div {
+        let inspection = self.runner.inspection_state();
+        let connected = inspection.connected;
+        let store = self.theme.read(cx);
+        let theme = &store.theme;
+        let selected_title = self
+            .debug_windows
+            .selected_window()
+            .map(|window| window.title.clone())
+            .unwrap_or_else(|| "Select a window".into());
+        let has_windows = self
+            .debug_windows
+            .catalog
+            .as_ref()
+            .is_some_and(|catalog| !catalog.windows.is_empty());
+        let mut header = div()
+            .flex()
+            .flex_col()
+            .flex_shrink_0()
+            .gap(px(8.))
+            .child(div().small_style(theme).child("Debug windows"))
+            .child(
+                div().flex().gap(px(6.)).items_center().child(
+                    div()
+                        .id("debug-window-selector")
+                        .flex_1()
+                        .min_w(px(0.))
+                        .button_style(theme, false, connected && has_windows)
+                        .child(format!("{selected_title} ▾"))
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            if view.debug_windows.selected_window().is_some() {
+                                view.windows_dropdown_open = !view.windows_dropdown_open;
+                                cx.notify();
+                            }
+                        })),
+                ),
+            );
+        if self.windows_dropdown_open {
+            let mut choices = div()
+                .id("debug-window-options")
+                .max_h(px(220.))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap(px(4.));
+            if let Some(catalog) = &self.debug_windows.catalog {
+                for window in &catalog.windows {
+                    let id = window.id.clone();
+                    choices = choices.child(
+                        div()
+                            .id(SharedString::from(format!("window-option-{id}")))
+                            .flex_shrink_0()
+                            .button_style(
+                                theme,
+                                self.debug_windows.selected.as_ref() == Some(&id),
+                                true,
+                            )
+                            .child(window.title.clone())
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.debug_windows.selected = Some(id.clone());
+                                view.windows_dropdown_open = false;
+                                view.debug_window_scroll.set_offset(point(px(0.), px(0.)));
+                                cx.notify();
+                            })),
+                    );
+                }
+            }
+            header = header.child(choices);
+        }
+        let mut content = div()
+            .id("debug-window-canvas")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .track_scroll(&self.debug_window_scroll)
+            .flex()
+            .flex_col()
+            .gap(px(10.));
+        if let (Some(catalog), Some(window)) = (
+            &self.debug_windows.catalog,
+            self.debug_windows.selected_window(),
+        ) {
+            for element in &window.elements {
+                content = content.child(self.debug_element(
+                    element,
+                    (&window.id, catalog.revision),
+                    &inspection,
+                    theme,
+                    cx,
+                ));
+            }
+        } else {
+            content = content.child(div().small_style(theme).child(if !connected {
+                "Waiting for the game connection."
+            } else if self.debug_windows.catalog.is_some() {
+                "No debug windows found."
+            } else {
+                "Loading debug windows..."
+            }));
+        }
+        if let Some(catalog) = &self.debug_windows.catalog {
+            for error in &catalog.errors {
+                content = content.child(
+                    div()
+                        .small_style(theme)
+                        .text_color(rgb(theme.colors.error.0))
+                        .child(error.clone()),
+                );
+            }
+        }
+        div()
+            .w(px(theme.spacing.sidebar_width))
+            .h(px(720. / scale + 240.))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .panel_style(theme)
+            .overflow_hidden()
+            .child(header)
+            .child(content)
+    }
+
     fn entities_panel(&self, cx: &mut Context<Self>) -> Div {
         let hierarchy_scrollbar = self.scrollbar(ScrollSection::Hierarchy, cx);
         let properties_scrollbar = self.scrollbar(ScrollSection::Properties, cx);
@@ -592,6 +896,7 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entities_panel = self.entities_panel(cx);
         let scale = window.scale_factor();
+        let debug_windows_panel = self.debug_windows_panel(scale, cx);
         let tracked = self.bounds.clone();
         let query = self.search.read(cx).query().to_owned();
         let store = self.theme.read(cx);
@@ -838,7 +1143,8 @@ impl Render for Workspace {
                                             .child(self.scrollbar(ScrollSection::Console, cx)),
                                     ),
                             ),
-                    ),
+                    )
+                    .child(debug_windows_panel),
             )
     }
 }

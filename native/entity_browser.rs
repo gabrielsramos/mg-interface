@@ -149,7 +149,7 @@ impl EntityBrowser {
 mod tests {
     use super::*;
     fn state(sequence: u64) -> InspectionState {
-        InspectionState { connected: true, error: None, snapshot: Some(serde_json::from_value(serde_json::json!({
+        InspectionState { connected: true, error: None, windows: None, checkbox_pending: None, snapshot: Some(serde_json::from_value(serde_json::json!({
             "version":1, "type":"sceneSnapshot", "sequence":sequence,
             "worldRoots":["root"], "uiRoots":["ui"], "worldTransform":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],
             "entities":[{"id":"root", "name":"Grid", "children":["child"]},

@@ -1,4 +1,6 @@
 #[cfg(any(windows, test))]
+mod debug_windows;
+#[cfg(any(windows, test))]
 mod entity_browser;
 #[cfg(any(windows, test))]
 mod log_search;
